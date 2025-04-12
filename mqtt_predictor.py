@@ -4,15 +4,14 @@ import torch
 import torch.nn as nn
 import pickle
 import paho.mqtt.client as mqtt
-import schedule
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Device
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# Define model class (must match training)
+# Define model class
 class TemperatureNN(nn.Module):
     def __init__(self, input_size):
         super().__init__()
@@ -48,17 +47,26 @@ feature_columns = checkpoint['feature_columns']
 print(f"Loaded model with features: {feature_columns}")
 
 # MQTT setup
-broker = "41cc8a0bbb1a4924947dc1ea1afbef36.s1.eu.hivemq.cloud"  # Change to your MQTT broker address (e.g., "test.mosquitto.org")
-port = 8883           # Default MQTT port
-topic = "algiers/temperature"  # Topic to publish to
-user = "comp_user"
+broker = "06bc4541ea0049c68e8fdeb06d156411.s1.eu.hivemq.cloud"
+port = 8883
+topic = "algiers/temperature"
+user = "ai_model"
 password = "Password1"
 
 # MQTT client
-client = mqtt.Client()
-client.connect(broker, port)
-client.username_pw_set(user,password)
+client = mqtt.Client(client_id="temperature_predictor_" + str(time.time()))
+client.username_pw_set(user, password)
+client.tls_set()
+client.on_connect = lambda c, u, f, rc: print(f"Connected with code {rc}" if rc == 0 else f"Connection failed: {rc}")
+client.on_publish = lambda c, u, mid: print(f"Published message ID {mid}")
 
+# Connect
+try:
+    client.connect(broker, port)
+    client.loop_start()
+except Exception as e:
+    print(f"Connection error: {e}")
+    exit(1)
 
 # Prediction function
 def predict_temperature(model, scaler, date_str, hour, feature_columns):
@@ -84,22 +92,30 @@ def predict_temperature(model, scaler, date_str, hour, feature_columns):
     return prediction
 
 # Function to send prediction
-def send_prediction():
-    now = datetime.now()
-    date_str = now.strftime('%Y-%m-%d')
-    hour = now.hour
+def send_prediction(predict_time):
+    date_str = predict_time.strftime('%Y-%m-%d')
+    hour = predict_time.hour
     temp = predict_temperature(model, scaler, date_str, hour, feature_columns)
-    message = f"{temp:.2f}"
-    client.publish(topic, message)
-    print(f"Published to {topic}: {date_str} {hour:02d}:00 - {message}°C")
+    datetime_str = predict_time.strftime('%Y-%m-%d %H:%M:%S')
+    message = f'{{"temp": {temp:.2f}, "datetime": "{datetime_str}"}}'
+    result = client.publish(topic, message, qos=1)
+    if result.rc == mqtt.MQTT_ERR_SUCCESS:
+        print(f"Published to {topic}: {datetime_str} - {temp:.2f}°C")
+    else:
+        print(f"Failed to publish: {result.rc}")
 
-# Schedule to run every hour
-schedule.every().hour.at(":00").do(send_prediction)
+# Continuous predictions
+try:
+    predict_time = datetime.now() + timedelta(hours=1)  # Start 1 hour ahead
+    predict_time = predict_time.replace(minute=0, second=0, microsecond=0)  # Align to hour
+    while True:
+        send_prediction(predict_time)
+        predict_time += timedelta(hours=1)  # Move to next hour
+        time.sleep(1)  # Wait 1 second between predictions
+except KeyboardInterrupt:
+    print("Stopping...")
+finally:
+    client.loop_stop()
+    client.disconnect()
 
-# Initial prediction
-send_prediction()
-
-# Keep script running
-while True:
-    schedule.run_pending()
-    time.sleep(1)
+#tntafc123
